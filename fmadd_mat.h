@@ -5,7 +5,7 @@ static inline __attribute__((always_inline)) void fmadd_mat(const double* __rest
                                                                     const double* __restrict B, 
                                                                     double* __restrict C) {
     /* process C += AxB in chunks of 4x8 to maximize register usage
-    * each ymm register holds 4 floats so we will need two for each row
+    * each ymm register holds 4 doubles so we will need two for each row
     * we will use registers ymm0-ymm7 for the accumulators of C
     */
     for (int a_row = 0; a_row < 128; a_row += 4) {

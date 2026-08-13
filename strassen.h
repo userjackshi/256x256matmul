@@ -28,12 +28,14 @@ static inline __attribute__((always_inline)) double sum_all_squared(const double
     return t[0]+t[1]+t[2]+t[3];
 }
 
+// Returns the squared Frobenius norm of a x b.
+// Scratch buffers are thread_local, so concurrent calls from different threads are safe.
 double multiply_matrices_sum(double a[256][256], double b[256][256]) {
     // Strassen algorithm: Split c=axb into four 128x128 chunks c00, c01, c10, c11
-    alignas(32) static double c00[128*128];
-    alignas(32) static double c01[128*128];
-    alignas(32) static double c10[128*128];
-    alignas(32) static double c11[128*128];
+    alignas(32) thread_local static double c00[128*128];
+    alignas(32) thread_local static double c01[128*128];
+    alignas(32) thread_local static double c10[128*128];
+    alignas(32) thread_local static double c11[128*128];
     std::memset(c00, 0, sizeof(c00));
     std::memset(c01, 0, sizeof(c01));
     std::memset(c10, 0, sizeof(c10));
@@ -48,8 +50,8 @@ double multiply_matrices_sum(double a[256][256], double b[256][256]) {
     const double* b10 = &b[128][0];
     const double* b11 = &b[128][128];
     // contiguous temporary compute buffers for A and B
-    alignas(32) static double buffer_a[128*128]; // regular contiguous matrix storing
-    alignas(32) static double buffer_b[128*128]; // contiguous panel layout matrix
+    alignas(32) thread_local static double buffer_a[128*128]; // regular contiguous matrix storing
+    alignas(32) thread_local static double buffer_b[128*128]; // contiguous panel layout matrix
     // Strassen blocks:
     // M1 = (A00+A11)x(B00+B11) -> used in c00, c11
     cache_op::add_mat_a(a00, a11, buffer_a);
@@ -60,7 +62,7 @@ double multiply_matrices_sum(double a[256][256], double b[256][256]) {
     cache_op::add_mat_a(a10, a11, buffer_a);
     cache_op::store_mat_b(b00, buffer_b);
     cache_op::fmadd_mat(buffer_a, buffer_b, c10);
-    cache_op::neg_mat(buffer_a); // -M2 = -(A10+A11)xB11
+    cache_op::neg_mat(buffer_a); // -M2 = -(A10+A11)xB00
     cache_op::fmadd_mat(buffer_a, buffer_b, c11);
     // M3 = A00x(B01-B11) -> used in c01, c11
     cache_op::store_mat_a(a00, buffer_a);
@@ -91,12 +93,15 @@ double multiply_matrices_sum(double a[256][256], double b[256][256]) {
         +strassen::sum_all_squared(c10)+strassen::sum_all_squared(c11);
 }
 
+// Returns a pointer to thread_local static storage holding a x b.
+// The next call on the same thread overwrites that storage; use
+// multiply_matrices_into to keep a copy that survives later calls.
 double (*multiply_matrices(double a[256][256], double b[256][256]))[256] {
     // Strassen algorithm: Split c=axb into four 128x128 chunks c00, c01, c10, c11
-    alignas(32) static double c00[128*128];
-    alignas(32) static double c01[128*128];
-    alignas(32) static double c10[128*128];
-    alignas(32) static double c11[128*128];
+    alignas(32) thread_local static double c00[128*128];
+    alignas(32) thread_local static double c01[128*128];
+    alignas(32) thread_local static double c10[128*128];
+    alignas(32) thread_local static double c11[128*128];
     std::memset(c00, 0, sizeof(c00));
     std::memset(c01, 0, sizeof(c01));
     std::memset(c10, 0, sizeof(c10));
@@ -111,8 +116,8 @@ double (*multiply_matrices(double a[256][256], double b[256][256]))[256] {
     const double* b10 = &b[128][0];
     const double* b11 = &b[128][128];
     // contiguous temporary compute buffers for A and B
-    alignas(32) static double buffer_a[128*128]; // regular contiguous matrix storing
-    alignas(32) static double buffer_b[128*128]; // contiguous panel layout matrix
+    alignas(32) thread_local static double buffer_a[128*128]; // regular contiguous matrix storing
+    alignas(32) thread_local static double buffer_b[128*128]; // contiguous panel layout matrix
     // Strassen blocks:
     // M1 = (A00+A11)x(B00+B11) -> used in c00, c11
     cache_op::add_mat_a(a00, a11, buffer_a);
@@ -123,7 +128,7 @@ double (*multiply_matrices(double a[256][256], double b[256][256]))[256] {
     cache_op::add_mat_a(a10, a11, buffer_a);
     cache_op::store_mat_b(b00, buffer_b);
     cache_op::fmadd_mat(buffer_a, buffer_b, c10);
-    cache_op::neg_mat(buffer_a); // -M2 = -(A10+A11)xB11
+    cache_op::neg_mat(buffer_a); // -M2 = -(A10+A11)xB00
     cache_op::fmadd_mat(buffer_a, buffer_b, c11);
     // M3 = A00x(B01-B11) -> used in c01, c11
     cache_op::store_mat_a(a00, buffer_a);
@@ -150,7 +155,7 @@ double (*multiply_matrices(double a[256][256], double b[256][256]))[256] {
     cache_op::add_mat_b(b10, b11, buffer_b);
     cache_op::fmadd_mat(buffer_a, buffer_b, c00);
     // store and return matrix
-    alignas(32) static double c[256][256];
+    alignas(32) thread_local static double c[256][256];
     for (int i = 0; i < 128; i++) {
         // top of C (128 rows) -> c[i]
         std::memcpy(c[i], &c00[i*128], 128*sizeof(double)); // copy i-th row of first block into c
@@ -160,5 +165,13 @@ double (*multiply_matrices(double a[256][256], double b[256][256]))[256] {
         std::memcpy(c[i+128]+128, &c11[i*128], 128*sizeof(double)); // copy i-th row of fourth block into c
     }
     return c;
+}
+
+// Computes a x b and copies the product into caller-owned storage, so the
+// result survives later calls on the same thread.
+void multiply_matrices_into(double a[256][256], double b[256][256],
+                            double c_out[256][256]) {
+    double (*c)[256] = multiply_matrices(a, b);
+    std::memcpy(c_out, c, 256 * 256 * sizeof(double));
 }
 };
